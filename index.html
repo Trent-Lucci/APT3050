@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>USIU Lab-Guard</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo" aria-hidden="true">🛡️</div>
+      <div>
+        <h1>USIU Lab-Guard</h1>
+        <p>Computer Lab Inventory &amp; Incident Recovery</p>
+      </div>
+    </div>
+    <span class="live" id="updated">Connecting…</span>
+    <button type="button" class="ghost" id="open-pc">+ Add computer</button>
+    <button type="button" id="open-sim">Simulate incident</button>
+  </header>
+
+  <main>
+    <section class="stats" id="stats" aria-label="Summary"></section>
+    <section class="board" id="board" aria-label="Incident workflow"></section>
+
+    <section>
+      <div class="inv-head">
+        <h2>Lab Computer Inventory</h2>
+        <input type="search" id="filter" placeholder="Filter by tag, room, OS or status" aria-label="Filter inventory" />
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Asset Tag</th><th>Lab Room</th><th>OS</th><th>Status</th></tr></thead>
+          <tbody id="inventory-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="pc-dialog">
+    <h2>Add lab computer</h2>
+    <form id="pc-form">
+      <label>Asset tag <input type="text" id="new_asset_tag" placeholder="USIU-LAB2-06" required /></label>
+      <label>Lab room <input type="text" id="new_lab_room" placeholder="Lab 2 - Networking" required /></label>
+      <label>Operating system <input type="text" id="new_os_version" placeholder="Windows 11 Pro" required /></label>
+      <div class="actions">
+        <button type="button" class="ghost" id="cancel-pc">Cancel</button>
+        <button type="submit">Save computer</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="sim-dialog">
+    <h2>Simulate security incident</h2>
+    <form id="sim-form">
+      <label>Asset tag <input type="text" id="asset_tag" placeholder="USIU-LAB1-01" required /></label>
+      <label>Incident type
+        <select id="incident_preset">
+          <option value="Malware / Trojan detected">Malware / Trojan detected</option>
+          <option value="Unauthorized USB file transfer">Unauthorized USB file transfer</option>
+          <option value="Unpatched OS vulnerability">Unpatched OS vulnerability</option>
+          <option value="Suspicious PowerShell script">Suspicious PowerShell script</option>
+          <option value="Repeated failed admin logins">Repeated failed admin logins</option>
+          <option value="Unauthorized file sharing">Unauthorized file sharing</option>
+          <option value="Custom">Custom incident…</option>
+        </select>
+      </label>
+      <label id="custom_title_wrap" hidden>Custom incident description
+        <input type="text" id="custom_title" placeholder="Describe the security incident" />
+      </label>
+      <label>Severity
+        <select id="severity">
+          <option value="Critical">Critical</option>
+          <option value="Medium">Medium</option>
+          <option value="Low">Low</option>
+        </select>
+      </label>
+      <div class="actions">
+        <button type="button" class="ghost" id="cancel-sim">Cancel</button>
+        <button type="submit">Trigger incident</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script>
+    const stages = [
+      { name: "Reported", color: "#60a5fa" },
+      { name: "Assigned", color: "#a78bfa" },
+      { name: "In Progress", color: "#fbbf24" },
+      { name: "Resolved", color: "#34d399" },
+    ];
+    const EASE = "cubic-bezier(.22, 1, .36, 1)";
+    const calm = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    let data = { incidents: [], computers: [] };
+
+    const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+    function dueLabel(inc) {
+      const ms = new Date(inc.deadline.replace(" ", "T")) - Date.now();
+      if (isNaN(ms)) return `Due ${esc(inc.deadline)}`;
+      const h = Math.floor(Math.abs(ms) / 36e5), m = Math.floor(Math.abs(ms) % 36e5 / 6e4);
+      const span = h >= 24 ? `${Math.floor(h / 24)}d ${h % 24}h` : h ? `${h}h ${m}m` : `${m}m`;
+      return ms < 0 ? `Overdue by ${span}` : `Due in ${span}`;
+    }
+
+    function render() {
+      const { incidents, computers } = data;
+      const before = new Map([...document.querySelectorAll(".ticket")].map(t => [t.dataset.id, t.getBoundingClientRect()]));
+      const overdue = incidents.filter(i => i.is_overdue && i.workflow_stage !== "Resolved").length;
+      const active = incidents.filter(i => i.workflow_stage !== "Resolved").length;
+
+      document.getElementById("stats").innerHTML = `
+        <div class="card"><h3>Total PCs</h3><p>${computers.length}</p></div>
+        <div class="card"><h3>Active incidents</h3><p>${active}</p></div>
+        <div class="card ${overdue ? "danger" : ""}"><h3>Overdue alerts</h3><p>${overdue}</p></div>`;
+
+      document.getElementById("board").innerHTML = stages.map(({ name, color }, idx) => {
+        const items = incidents.filter(i => i.workflow_stage === name);
+        const next = stages[idx + 1]?.name;
+        return `<div class="column" style="--c:${color}">
+          <h3>${name}<span class="count">${items.length}</span></h3>
+          ${items.map(inc => `
+            <article class="ticket ${inc.is_overdue && next ? "overdue" : ""}" data-id="${inc.id}">
+              <div class="ticket-top"><strong>${esc(inc.asset_tag)}</strong><span class="badge sev-${esc(inc.severity.toLowerCase())}">${esc(inc.severity)}</span></div>
+              <p>${esc(inc.title)}</p>
+              <footer>
+                ${next ? `<span class="due ${inc.is_overdue ? "late" : ""}">${dueLabel(inc)}</span>
+                  <button data-advance="${inc.id}">${next} →</button>`
+                  : `<span class="done">✓ Resolved</span>
+                  <button class="ghost del" data-delete="${inc.id}">Delete</button>`}
+              </footer>
+            </article>`).join("") || `<div class="empty">No incidents</div>`}
+        </div>`;
+      }).join("");
+
+      renderInventory();
+      animate(before);
+      document.getElementById("updated").textContent = "Live · " + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    }
+
+    function renderInventory() {
+      const q = document.getElementById("filter").value.trim().toLowerCase();
+      document.getElementById("inventory-body").innerHTML = data.computers
+        .filter(pc => !q || [pc.asset_tag, pc.lab_room, pc.os_version, pc.status].join(" ").toLowerCase().includes(q))
+        .map(pc => `<tr>
+          <td>${esc(pc.asset_tag)}</td><td>${esc(pc.lab_room)}</td><td>${esc(pc.os_version)}</td>
+          <td><span class="pill status-${esc(pc.status.toLowerCase())}">${esc(pc.status)}</span></td></tr>`).join("")
+        || `<tr><td colspan="4" style="text-align:center;color:var(--muted)">No matching computers</td></tr>`;
+    }
+
+    function animate(before) {
+      document.querySelectorAll(".ticket").forEach(t => {
+        const from = before.get(t.dataset.id);
+        if (!from) { if (before.size) t.animate([{ opacity: 0, transform: "scale(.96)" }, { opacity: 1, transform: "none" }], { duration: 350, easing: EASE }); return; }
+        const to = t.getBoundingClientRect(), dx = from.left - to.left, dy = from.top - to.top;
+        if ((dx || dy) && !calm) t.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "none" }], { duration: 480, easing: EASE });
+      });
+    }
+
+    function toast(msg) {
+      const el = Object.assign(document.createElement("div"), { className: "toast", textContent: msg, role: "alert" });
+      document.body.append(el); setTimeout(() => el.remove(), 3500);
+    }
+
+    async function loadDashboard() {
+      try {
+        data = await (await fetch("/api/dashboard")).json();
+        render();
+      } catch { document.getElementById("updated").textContent = "Offline"; }
+    }
+
+    document.getElementById("board").addEventListener("click", async e => {
+      const del = e.target.closest("[data-delete]");
+      if (del) {
+        if (!del.classList.contains("armed")) {
+          del.classList.add("armed"); del.textContent = "Confirm?";
+          setTimeout(() => { if (del.isConnected) { del.classList.remove("armed"); del.textContent = "Delete"; } }, 3000);
+          return;
+        }
+        del.disabled = true;
+        const res = await fetch(`/api/incidents/${del.dataset.delete}`, { method: "DELETE" });
+        if (!res.ok) { del.disabled = false; return toast((await res.json().catch(() => ({}))).error || "Could not delete incident"); }
+        return loadDashboard();
+      }
+      const btn = e.target.closest("[data-advance]");
+      if (!btn) return;
+      btn.disabled = true;
+      await fetch(`/api/incidents/${btn.dataset.advance}/advance`, { method: "POST" });
+      loadDashboard();
+    });
+
+    const pcDlg = document.getElementById("pc-dialog");
+    document.getElementById("open-pc").onclick = () => pcDlg.showModal();
+    document.getElementById("cancel-pc").onclick = () => pcDlg.close();
+
+    document.getElementById("pc-form").addEventListener("submit", async e => {
+      e.preventDefault();
+      const payload = {
+        asset_tag: document.getElementById("new_asset_tag").value.trim(),
+        lab_room: document.getElementById("new_lab_room").value.trim(),
+        os_version: document.getElementById("new_os_version").value.trim()
+      };
+      const res = await fetch("/api/computers", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+      const result = await res.json();
+      if (!res.ok) return toast(result.error || "Could not add computer");
+      e.target.reset(); pcDlg.close(); loadDashboard();
+    });
+
+    const dlg = document.getElementById("sim-dialog");
+    document.getElementById("open-sim").onclick = () => dlg.showModal();
+    document.getElementById("cancel-sim").onclick = () => dlg.close();
+    
+    const presetSelect = document.getElementById("incident_preset");
+    const customWrap = document.getElementById("custom_title_wrap");
+    const customInput = document.getElementById("custom_title");
+
+    presetSelect.addEventListener("change", () => {
+      const isCustom = presetSelect.value === "Custom";
+      customWrap.hidden = !isCustom;
+      customInput.required = isCustom;
+      if (!isCustom) customInput.value = "";
+    });
+
+    document.getElementById("sim-form").addEventListener("submit", async e => {
+      e.preventDefault();
+      const title = presetSelect.value === "Custom"
+        ? customInput.value.trim()
+        : presetSelect.value;
+
+      const payload = {
+        asset_tag: document.getElementById("asset_tag").value.trim(),
+        title,
+        severity: document.getElementById("severity").value
+      };
+      const res = await fetch("/api/incidents/report", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      const result = await res.json();
+      if (!res.ok) return toast(result.error || "Could not log incident");
+
+      customWrap.hidden = true;
+      customInput.required = false;
+      e.target.reset();
+      dlg.close();
+      loadDashboard();
+    });
+
+
+    loadDashboard();
+    setInterval(loadDashboard, 30000);
+  </script>
+</body>
+</html>
